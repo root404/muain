@@ -5,7 +5,8 @@ import {
   ChevronLeft, Quote, Sparkles,
   MessageCircle, Lightbulb, Check,
   Play, RotateCcw, HelpCircle,
-  Filter, ArrowUpDown, Calendar, Target
+  Filter, ArrowUpDown, Calendar, Target,
+  Clock // Added Clock icon
 } from 'lucide-react';
 import { motion, AnimatePresence, Variants } from 'framer-motion';
 import { getAyahBatch, evaluateRecitation, evaluateAudioRecitation } from './geminiService.ts';
@@ -29,6 +30,13 @@ const blobToBase64 = (blob: Blob): Promise<string> => {
   });
 };
 
+// Helper to format seconds into mm:ss
+const formatTime = (seconds: number) => {
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+};
+
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>(AppState.IDLE);
   const [difficulty, setDifficulty] = useState<Difficulty>('medium');
@@ -46,6 +54,8 @@ const App: React.FC = () => {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
+  const [recordingDuration, setRecordingDuration] = useState<number>(0);
+  const timerRef = useRef<any>(null); // Ref for the timer interval
   
   const [historySort, setHistorySort] = useState<'dateDesc' | 'dateAsc' | 'accDesc' | 'accAsc'>('dateDesc');
   const [historyFilter, setHistoryFilter] = useState<'all' | 'correct' | 'mistakes'>('all');
@@ -106,12 +116,27 @@ const App: React.FC = () => {
       recognitionRef.current.lang = 'ar-SA';
       recognitionRef.current.continuous = true;
       recognitionRef.current.interimResults = true;
+      
       recognitionRef.current.onresult = (event: any) => {
-        let currentTranscript = '';
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
-          currentTranscript += event.results[i][0].transcript;
+        // IMPORTANT: We must iterate from 0 to length every time to reconstruct the full transcript.
+        // If we rely on resultIndex, we lose previous segments when the engine detects a pause/finality.
+        let finalTranscript = '';
+        let interimTranscript = '';
+
+        for (let i = 0; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) {
+            finalTranscript += event.results[i][0].transcript;
+          } else {
+            interimTranscript += event.results[i][0].transcript;
+          }
         }
-        setTranscript(currentTranscript);
+        setTranscript(finalTranscript + ' ' + interimTranscript);
+      };
+
+      // Prevent recognition from stopping automatically if the user pauses for a long time
+      // Note: We don't force restart here to avoid infinite loops, but the AudioRecorder is separate and won't stop.
+      recognitionRef.current.onerror = (event: any) => {
+        console.warn("Speech recognition error", event.error);
       };
     }
   }, []);
@@ -181,6 +206,7 @@ const App: React.FC = () => {
     setError(null);
     setTranscript('');
     setAudioBlob(null);
+    setRecordingDuration(0);
     audioChunksRef.current = [];
     
     try {
@@ -200,6 +226,13 @@ const App: React.FC = () => {
 
       mediaRecorder.start();
       setState(AppState.RECORDING);
+
+      // Start Timer
+      if (timerRef.current) clearInterval(timerRef.current);
+      timerRef.current = setInterval(() => {
+        setRecordingDuration(prev => prev + 1);
+      }, 1000);
+
     } catch (e) {
       setError("يرجى السماح بصلاحية الميكروفون");
       setState(AppState.READY);
@@ -207,8 +240,14 @@ const App: React.FC = () => {
   };
 
   const stopRecording = () => {
+    // Stop Timer
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+
     // Stop Visual Recognition
-    recognitionRef.current?.stop();
+    try { recognitionRef.current?.stop(); } catch(e) {}
 
     // Stop Actual Recording
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
@@ -464,10 +503,17 @@ const App: React.FC = () => {
                       )}
                       {state === AppState.RECORDING && (
                         <div className="flex flex-col items-center gap-6 w-full">
-                          <motion.button animate={{ scale: [1, 1.1, 1] }} transition={{ repeat: Infinity, duration: 1.5 }} onClick={stopRecording} className="w-24 h-24 bg-red-600 text-white rounded-full flex items-center justify-center shadow-xl shadow-red-600/20 btn-modern relative">
-                            <div className="absolute inset-0 bg-red-600 rounded-full animate-ping opacity-20"></div>
-                            <div className="w-6 h-6 bg-white rounded-sm"></div>
-                          </motion.button>
+                          <div className="flex flex-col items-center">
+                             <motion.button animate={{ scale: [1, 1.1, 1] }} transition={{ repeat: Infinity, duration: 1.5 }} onClick={stopRecording} className="w-24 h-24 bg-red-600 text-white rounded-full flex items-center justify-center shadow-xl shadow-red-600/20 btn-modern relative">
+                                <div className="absolute inset-0 bg-red-600 rounded-full animate-ping opacity-20"></div>
+                                <div className="w-6 h-6 bg-white rounded-sm"></div>
+                             </motion.button>
+                             <div className="mt-4 flex items-center gap-2 bg-slate-800 text-white px-4 py-1.5 rounded-full text-sm font-bold shadow-md">
+                               <Clock size={16} className="text-red-400 animate-pulse" />
+                               <span>{formatTime(recordingDuration)}</span>
+                             </div>
+                          </div>
+                          
                           <div className="bg-white px-8 py-4 rounded-2xl border-2 border-emerald-900 text-center shadow-lg w-full max-h-40 overflow-hidden">
                              <p className="text-emerald-900 font-bold italic leading-relaxed break-words">
                                {transcript ? `"${transcript}"` : (
