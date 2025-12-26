@@ -60,7 +60,8 @@ const App: React.FC = () => {
   const summaryRef = useRef<HTMLDivElement>(null);
   const contextRef = useRef<HTMLDivElement>(null);
 
-  const executeProgrammaticScroll = (target: React.RefObject<HTMLDivElement>, block: ScrollLogicalPosition = 'center') => {
+  // Fix: Allow RefObject<HTMLDivElement | null> to handle useRef(null) initialization
+  const executeProgrammaticScroll = (target: React.RefObject<HTMLDivElement | null>, block: ScrollLogicalPosition = 'center') => {
     if (target.current) {
       target.current.scrollIntoView({ behavior: 'smooth', block });
     }
