@@ -6,10 +6,10 @@ import {
   MessageCircle, Lightbulb, Check,
   Play, RotateCcw, HelpCircle,
   Filter, ArrowUpDown, Calendar, Target,
-  Clock // Added Clock icon
+  Clock, Zap, AlertTriangle // Added Zap and AlertTriangle
 } from 'lucide-react';
 import { motion, AnimatePresence, Variants } from 'framer-motion';
-import { getAyahBatch, evaluateRecitation, evaluateAudioRecitation } from './geminiService.ts';
+import { getAyahBatch, evaluateRecitation, evaluateAudioRecitation, getRateLimitStatus } from './geminiService.ts';
 import { AppState, Difficulty, EvaluationResult, HistoryItem, AyahData } from './types.ts';
 
 const QUESTIONS_PER_SESSION = 5;
@@ -49,6 +49,9 @@ const App: React.FC = () => {
   const [showHistory, setShowHistory] = useState<boolean>(false);
   const [sessionResults, setSessionResults] = useState<EvaluationResult[]>([]);
   const [hintsRevealed, setHintsRevealed] = useState<string[]>([]);
+  
+  // Rate Limit State
+  const [quotaPercent, setQuotaPercent] = useState<number>(100);
   
   // Audio Recording State
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -147,6 +150,14 @@ const App: React.FC = () => {
         console.warn("Speech recognition error", event.error);
       };
     }
+
+    // Polling for Quota Status
+    const quotaInterval = setInterval(() => {
+       const status = getRateLimitStatus();
+       setQuotaPercent(status.percentage);
+    }, 1000);
+
+    return () => clearInterval(quotaInterval);
   }, []);
 
   useEffect(() => {
@@ -180,6 +191,10 @@ const App: React.FC = () => {
   const currentAyah = ayahQueue[currentQuestionIndex] || null;
 
   const handleStartSession = async () => {
+    if (quotaPercent === 0) {
+      setError("الرجاء الانتظار قليلاً لاستعادة رصيد الطاقة.");
+      return;
+    }
     setError(null);
     setState(AppState.LOADING_AYAH);
     setSessionResults([]);
@@ -191,10 +206,11 @@ const App: React.FC = () => {
     try {
       const excluded = history.map(h => h.ayahNumber).slice(0, 20);
       const batch = await getAyahBatch(QUESTIONS_PER_SESSION, difficulty, excluded);
+      if (!batch || batch.length === 0) throw new Error("تعذر تحميل الآيات");
       setAyahQueue(batch as AyahData[]);
       setState(AppState.READY);
-    } catch (err) {
-      setError("تعذر الاتصال بالذكاء الاصطناعي");
+    } catch (err: any) {
+      setError(err.message || "تعذر الاتصال بالذكاء الاصطناعي");
       setState(AppState.IDLE);
     }
   };
@@ -281,6 +297,11 @@ const App: React.FC = () => {
   };
 
   const handleEvaluate = async () => {
+    if (quotaPercent === 0) {
+      setError("نفذ رصيد الطاقة. انتظر لحظات...");
+      return;
+    }
+
     setState(AppState.EVALUATING);
     try {
       if (currentAyah) {
@@ -316,10 +337,10 @@ const App: React.FC = () => {
         
         setState(AppState.FINISHED);
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error(e);
-      setError("خطأ في تحليل التسميع");
-      setState(AppState.READY);
+      setError(e.message || "خطأ في تحليل التسميع");
+      setState(AppState.CONFIRMING); // Go back to confirming state so user can retry later
     }
   };
 
@@ -342,6 +363,12 @@ const App: React.FC = () => {
     exit: { opacity: 0, y: -30, transition: { duration: 0.3 } }
   };
 
+  const getQuotaColor = () => {
+    if (quotaPercent > 50) return 'text-emerald-500';
+    if (quotaPercent > 20) return 'text-amber-500';
+    return 'text-red-500';
+  };
+
   return (
     <div className="flex-1 flex flex-col h-screen max-w-5xl mx-auto w-full px-4 md:px-8 overflow-hidden relative">
       
@@ -360,9 +387,29 @@ const App: React.FC = () => {
             <p className="text-[10px] text-emerald-700 font-bold uppercase tracking-wider">مساعدك الشخصي في المراجعة</p>
           </div>
         </div>
-        <motion.button whileTap={{ scale: 0.9 }} onClick={() => setShowHistory(true)} className="p-3 rounded-2xl bg-white border border-slate-100 text-slate-500 hover:text-emerald-900 transition-colors shadow-sm">
-          <History size={20} />
-        </motion.button>
+
+        <div className="flex items-center gap-2">
+           {/* Energy/Quota Indicator */}
+           <div className="hidden md:flex flex-col items-end mr-2">
+             <div className="flex items-center gap-1">
+               <span className={`text-[10px] font-black uppercase ${getQuotaColor()}`}>
+                 {quotaPercent}%
+               </span>
+               <Zap size={16} className={`${getQuotaColor()} fill-current`} />
+             </div>
+             <div className="w-24 h-1 bg-slate-100 rounded-full mt-1 overflow-hidden">
+               <motion.div 
+                 initial={{ width: '100%' }}
+                 animate={{ width: `${quotaPercent}%` }}
+                 className={`h-full ${quotaPercent > 50 ? 'bg-emerald-500' : quotaPercent > 20 ? 'bg-amber-500' : 'bg-red-500'}`}
+               />
+             </div>
+           </div>
+
+           <motion.button whileTap={{ scale: 0.9 }} onClick={() => setShowHistory(true)} className="p-3 rounded-2xl bg-white border border-slate-100 text-slate-500 hover:text-emerald-900 transition-colors shadow-sm">
+             <History size={20} />
+           </motion.button>
+        </div>
       </motion.header>
 
       {/* Main Content: Scrollable Area */}
@@ -373,6 +420,15 @@ const App: React.FC = () => {
         <AnimatePresence mode="wait">
           {state === AppState.IDLE && (
             <motion.div key="idle" variants={pageVariants} initial="initial" animate="enter" exit="exit" className="flex-none flex flex-col items-center justify-center text-center space-y-8 py-20 min-h-full">
+              
+              {/* Mobile Quota Indicator */}
+              <div className="md:hidden absolute top-0 left-0 right-0 flex justify-center p-4">
+                 <div className="flex items-center gap-2 bg-white/80 px-4 py-2 rounded-full shadow-sm border border-slate-100">
+                    <Zap size={14} className={`${getQuotaColor()} fill-current`} />
+                    <span className="text-xs font-bold text-slate-600">طاقة السيرفر: {quotaPercent}%</span>
+                 </div>
+              </div>
+
               <div className="space-y-4">
                 <h2 className="text-5xl md:text-7xl font-bold text-slate-900 quran-text leading-tight">تثبيت سورة البقرة <br/><span className="text-emerald-800">بالذكاء الاصطناعي</span></h2>
                 <p className="text-slate-500 text-lg md:text-xl max-w-xl mx-auto leading-relaxed">اختبر جودة حفظك من خلال التسميع الصوتي والتقييم الفوري المعتمد على مخارج الحروف الصحيحة.</p>
@@ -385,8 +441,21 @@ const App: React.FC = () => {
                     </button>
                   ))}
                 </div>
-                <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={handleStartSession} className="w-full py-6 bg-emerald-900 text-white rounded-3xl font-black text-2xl shadow-xl shadow-emerald-900/20 btn-modern flex items-center justify-center gap-4">
-                  ابدأ الاختبار <Play size={24} fill="white" />
+                <motion.button 
+                  whileHover={{ scale: 1.02 }} 
+                  whileTap={{ scale: 0.98 }} 
+                  onClick={handleStartSession} 
+                  disabled={quotaPercent === 0}
+                  className={`w-full py-6 rounded-3xl font-black text-2xl shadow-xl flex items-center justify-center gap-4 transition-all
+                    ${quotaPercent > 0 
+                      ? 'bg-emerald-900 text-white shadow-emerald-900/20 btn-modern' 
+                      : 'bg-slate-300 text-slate-500 cursor-not-allowed'}`}
+                >
+                  {quotaPercent > 0 ? (
+                    <>ابدأ الاختبار <Play size={24} fill="white" /></>
+                  ) : (
+                    <>يرجى الانتظار... <Clock size={24} /></>
+                  )}
                 </motion.button>
               </div>
               <div className="pt-8 grid grid-cols-2 gap-4 w-full max-w-sm text-center">
@@ -418,7 +487,12 @@ const App: React.FC = () => {
                   </div>
                   <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{currentQuestionIndex + 1} / {QUESTIONS_PER_SESSION}</span>
                 </div>
-                {error && <div className="text-red-500 text-[10px] font-bold bg-red-50 px-3 py-1 rounded-lg border border-red-100 animate-pulse">{error}</div>}
+                {error && (
+                   <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="flex items-center gap-2 text-red-600 text-[10px] font-bold bg-red-50 px-3 py-2 rounded-lg border border-red-100 shadow-sm">
+                     <AlertTriangle size={12} />
+                     {error}
+                   </motion.div>
+                )}
               </div>
 
               {state === AppState.FINISHED && result ? (
