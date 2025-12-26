@@ -1,0 +1,562 @@
+
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { 
+  Mic, History, BookOpen, Trophy, X, 
+  ChevronLeft, Quote, Sparkles,
+  MessageCircle, Lightbulb, Check,
+  Play, RotateCcw, HelpCircle,
+  Filter, ArrowUpDown, Calendar, Target
+} from 'lucide-react';
+import { motion, AnimatePresence, Variants } from 'framer-motion';
+import { getAyahBatch, evaluateRecitation, evaluateAudioRecitation } from './geminiService.ts';
+import { AppState, Difficulty, EvaluationResult, HistoryItem, AyahData } from './types.ts';
+
+const QUESTIONS_PER_SESSION = 5;
+const HINT_PENALTY_PER_WORD = 5;
+
+// Helper to convert Blob to Base64
+const blobToBase64 = (blob: Blob): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const base64String = reader.result as string;
+      // Remove the data URL prefix (e.g., "data:audio/webm;base64,")
+      const base64Data = base64String.split(',')[1];
+      resolve(base64Data);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+};
+
+const App: React.FC = () => {
+  const [state, setState] = useState<AppState>(AppState.IDLE);
+  const [difficulty, setDifficulty] = useState<Difficulty>('medium');
+  const [ayahQueue, setAyahQueue] = useState<AyahData[]>([]);
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState<number>(0);
+  const [result, setResult] = useState<EvaluationResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [transcript, setTranscript] = useState<string>('');
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [showHistory, setShowHistory] = useState<boolean>(false);
+  const [sessionResults, setSessionResults] = useState<EvaluationResult[]>([]);
+  const [hintsRevealed, setHintsRevealed] = useState<string[]>([]);
+  
+  // Audio Recording State
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
+  
+  const [historySort, setHistorySort] = useState<'dateDesc' | 'dateAsc' | 'accDesc' | 'accAsc'>('dateDesc');
+  const [historyFilter, setHistoryFilter] = useState<'all' | 'correct' | 'mistakes'>('all');
+
+  // We keep this for Visual Feedback (Real-time text), but use Audio for Logic
+  const recognitionRef = useRef<any>(null);
+  
+  const mainScrollRef = useRef<HTMLElement>(null);
+  const challengeRef = useRef<HTMLDivElement>(null);
+  const recordingRef = useRef<HTMLDivElement>(null);
+  const resultCardRef = useRef<HTMLDivElement>(null);
+  const summaryRef = useRef<HTMLDivElement>(null);
+  const contextRef = useRef<HTMLDivElement>(null);
+
+  const executeProgrammaticScroll = (target: React.RefObject<HTMLDivElement>, block: ScrollLogicalPosition = 'center') => {
+    if (target.current) {
+      target.current.scrollIntoView({ behavior: 'smooth', block });
+    }
+  };
+
+  useEffect(() => {
+    switch (state) {
+      case AppState.READY:
+        executeProgrammaticScroll(challengeRef);
+        break;
+      case AppState.RECORDING:
+      case AppState.CONFIRMING:
+      case AppState.EVALUATING:
+        executeProgrammaticScroll(recordingRef, 'center');
+        break;
+      case AppState.FINISHED:
+        executeProgrammaticScroll(resultCardRef, 'start');
+        break;
+      case AppState.SESSION_SUMMARY:
+        executeProgrammaticScroll(summaryRef);
+        break;
+      case AppState.IDLE:
+        mainScrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+        break;
+    }
+  }, [state, result]);
+
+  useEffect(() => {
+    if (hintsRevealed.length > 0) {
+      executeProgrammaticScroll(challengeRef);
+    }
+  }, [hintsRevealed]);
+
+  useEffect(() => {
+    const saved = localStorage.getItem('muein_modern_v2');
+    if (saved) try { setHistory(JSON.parse(saved)); } catch(e) {}
+
+    // Initialize Speech Recognition for Visual Feedback Only
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      recognitionRef.current = new SpeechRecognition();
+      recognitionRef.current.lang = 'ar-SA';
+      recognitionRef.current.continuous = true;
+      recognitionRef.current.interimResults = true;
+      recognitionRef.current.onresult = (event: any) => {
+        let currentTranscript = '';
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          currentTranscript += event.results[i][0].transcript;
+        }
+        setTranscript(currentTranscript);
+      };
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('muein_modern_v2', JSON.stringify(history));
+  }, [history]);
+
+  const stats = useMemo(() => {
+    if (history.length === 0) return { avg: 0, count: 0, level: 'مبتدئ' };
+    const avgScore = Math.round(history.reduce((a, b) => a + b.accuracy, 0) / history.length);
+    const countTests = history.length;
+    let rank = 'طالب علم';
+    if (avgScore > 90 && countTests > 20) rank = 'حافظ مُتقن';
+    else if (countTests > 10) rank = 'مُراجع مُواظب';
+    return { avg: avgScore, count: countTests, level: rank };
+  }, [history]);
+
+  const filteredHistory = useMemo(() => {
+    let list = [...history];
+    if (historyFilter === 'correct') list = list.filter(h => h.status === 'correct');
+    if (historyFilter === 'mistakes') list = list.filter(h => h.status !== 'correct');
+    list.sort((a, b) => {
+      if (historySort === 'dateDesc') return b.timestamp - a.timestamp;
+      if (historySort === 'dateAsc') return a.timestamp - b.timestamp;
+      if (historySort === 'accDesc') return b.accuracy - a.accuracy;
+      if (historySort === 'accAsc') return a.accuracy - b.accuracy;
+      return 0;
+    });
+    return list;
+  }, [history, historySort, historyFilter]);
+
+  const currentAyah = ayahQueue[currentQuestionIndex] || null;
+
+  const handleStartSession = async () => {
+    setError(null);
+    setState(AppState.LOADING_AYAH);
+    setSessionResults([]);
+    setCurrentQuestionIndex(0);
+    setTranscript('');
+    setResult(null);
+    setHintsRevealed([]);
+    setAudioBlob(null);
+    try {
+      const excluded = history.map(h => h.ayahNumber).slice(0, 20);
+      const batch = await getAyahBatch(QUESTIONS_PER_SESSION, difficulty, excluded);
+      setAyahQueue(batch as AyahData[]);
+      setState(AppState.READY);
+    } catch (err) {
+      setError("تعذر الاتصال بالذكاء الاصطناعي");
+      setState(AppState.IDLE);
+    }
+  };
+
+  const handleGetHint = () => {
+    if (!currentAyah) return;
+    const fullTextWords = currentAyah.text.trim().split(/\s+/);
+    const startWordsCount = currentAyah.startWords.trim().split(/\s+/).length;
+    const availableWords = fullTextWords.slice(startWordsCount);
+    if (hintsRevealed.length < availableWords.length) {
+      const nextWord = availableWords[hintsRevealed.length];
+      setHintsRevealed(prev => [...prev, nextWord]);
+    }
+  };
+
+  const startRecording = async () => {
+    setError(null);
+    setTranscript('');
+    setAudioBlob(null);
+    audioChunksRef.current = [];
+    
+    try {
+      // Start Visual Recognition
+      try { recognitionRef.current?.start(); } catch (e) { /* ignore if already started */ }
+      
+      // Start Actual Audio Recording
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.start();
+      setState(AppState.RECORDING);
+    } catch (e) {
+      setError("يرجى السماح بصلاحية الميكروفون");
+      setState(AppState.READY);
+    }
+  };
+
+  const stopRecording = () => {
+    // Stop Visual Recognition
+    recognitionRef.current?.stop();
+
+    // Stop Actual Recording
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' }); // Chrome/Android uses webm usually
+        setAudioBlob(audioBlob);
+        
+        // If we didn't catch text visually, but have audio, we can still proceed
+        if (audioChunksRef.current.length > 0) {
+             setState(AppState.CONFIRMING);
+        } else {
+             setError("لم يتم تسجيل صوت");
+             setState(AppState.READY);
+        }
+        
+        // Stop all tracks
+        mediaRecorderRef.current?.stream.getTracks().forEach(track => track.stop());
+      };
+      mediaRecorderRef.current.stop();
+    } else {
+       setState(AppState.READY);
+    }
+  };
+
+  const handleEvaluate = async () => {
+    setState(AppState.EVALUATING);
+    try {
+      if (currentAyah) {
+        let evalResult: EvaluationResult;
+        
+        // Prefer Audio Analysis if available
+        if (audioBlob) {
+           const base64Audio = await blobToBase64(audioBlob);
+           // Detect MIME type (fallback to audio/webm if not explicit, though Blob usually has it)
+           const mimeType = audioBlob.type || 'audio/webm';
+           evalResult = await evaluateAudioRecitation(currentAyah.text, base64Audio, mimeType);
+        } else {
+           // Fallback to text analysis if audio failed for some reason
+           evalResult = await evaluateRecitation(currentAyah.text, transcript);
+        }
+
+        const penalty = hintsRevealed.length * HINT_PENALTY_PER_WORD;
+        evalResult.accuracy = Math.max(0, evalResult.accuracy - penalty);
+        evalResult.ayahNumber = currentAyah.number;
+        setResult(evalResult);
+        setSessionResults(prev => [...prev, evalResult]);
+        
+        setHistory(prev => [{
+          id: Date.now().toString(),
+          ayahNumber: currentAyah.number,
+          pageNumber: currentAyah.page,
+          difficulty: difficulty,
+          status: evalResult.status,
+          accuracy: evalResult.accuracy,
+          timestamp: Date.now(),
+          textSnippet: currentAyah.text.substring(0, 40)
+        }, ...prev].slice(0, 50));
+        
+        setState(AppState.FINISHED);
+      }
+    } catch (e) {
+      console.error(e);
+      setError("خطأ في تحليل التسميع");
+      setState(AppState.READY);
+    }
+  };
+
+  const nextAyah = () => {
+    if (currentQuestionIndex + 1 < ayahQueue.length) {
+      setCurrentQuestionIndex(prev => prev + 1);
+      setTranscript('');
+      setAudioBlob(null);
+      setResult(null);
+      setHintsRevealed([]);
+      setState(AppState.READY);
+    } else {
+      setState(AppState.SESSION_SUMMARY);
+    }
+  };
+
+  const pageVariants: Variants = {
+    initial: { opacity: 0, y: 30 },
+    enter: { opacity: 1, y: 0, transition: { duration: 0.6, ease: "easeOut" } },
+    exit: { opacity: 0, y: -30, transition: { duration: 0.3 } }
+  };
+
+  return (
+    <div className="flex-1 flex flex-col h-screen max-w-5xl mx-auto w-full px-4 md:px-8 overflow-hidden relative">
+      
+      {/* Header */}
+      <motion.header 
+        initial={{ y: -50, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        className="h-20 shrink-0 flex items-center justify-between z-50 bg-white/50 backdrop-blur-md"
+      >
+        <div className="flex items-center gap-3 cursor-pointer" onClick={() => setState(AppState.IDLE)}>
+          <motion.div whileHover={{ scale: 1.05 }} className="w-12 h-12 bg-emerald-900 text-white rounded-2xl flex items-center justify-center shadow-md">
+            <BookOpen size={24} />
+          </motion.div>
+          <div>
+            <h1 className="text-2xl font-black text-slate-900 quran-text leading-none">مُعين</h1>
+            <p className="text-[10px] text-emerald-700 font-bold uppercase tracking-wider">مساعدك الشخصي في المراجعة</p>
+          </div>
+        </div>
+        <motion.button whileTap={{ scale: 0.9 }} onClick={() => setShowHistory(true)} className="p-3 rounded-2xl bg-white border border-slate-100 text-slate-500 hover:text-emerald-900 transition-colors shadow-sm">
+          <History size={20} />
+        </motion.button>
+      </motion.header>
+
+      {/* Main Content: Scrollable Area */}
+      <main 
+        ref={mainScrollRef} 
+        className="flex-1 flex flex-col scroll-container pb-40"
+      >
+        <AnimatePresence mode="wait">
+          {state === AppState.IDLE && (
+            <motion.div key="idle" variants={pageVariants} initial="initial" animate="enter" exit="exit" className="flex-none flex flex-col items-center justify-center text-center space-y-8 py-20 min-h-full">
+              <div className="space-y-4">
+                <h2 className="text-5xl md:text-7xl font-bold text-slate-900 quran-text leading-tight">تثبيت سورة البقرة <br/><span className="text-emerald-800">بالذكاء الاصطناعي</span></h2>
+                <p className="text-slate-500 text-lg md:text-xl max-w-xl mx-auto leading-relaxed">اختبر جودة حفظك من خلال التسميع الصوتي والتقييم الفوري المعتمد على مخارج الحروف الصحيحة.</p>
+              </div>
+              <div className="flex flex-col gap-6 w-full max-w-md">
+                <div className="bg-white p-2 rounded-3xl border border-slate-100 shadow-sm flex items-center gap-1">
+                  {(['easy', 'medium', 'hard'] as const).map(l => (
+                    <button key={l} onClick={() => setDifficulty(l)} className={`flex-1 py-3 rounded-2xl text-xs font-bold transition-all ${difficulty === l ? 'bg-emerald-900 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-50'}`}>
+                      {l === 'easy' ? 'يسير' : l === 'medium' ? 'متوسط' : 'مُتقن'}
+                    </button>
+                  ))}
+                </div>
+                <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={handleStartSession} className="w-full py-6 bg-emerald-900 text-white rounded-3xl font-black text-2xl shadow-xl shadow-emerald-900/20 btn-modern flex items-center justify-center gap-4">
+                  ابدأ الاختبار <Play size={24} fill="white" />
+                </motion.button>
+              </div>
+              <div className="pt-8 grid grid-cols-2 gap-4 w-full max-w-sm text-center">
+                <div className="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm">
+                  <p className="text-emerald-700 text-[10px] font-black uppercase mb-1">دقة الحفظ</p>
+                  <span className="text-2xl font-black">{stats.avg}%</span>
+                </div>
+                <div className="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm">
+                  <p className="text-emerald-700 text-[10px] font-black uppercase mb-1">الرتبة</p>
+                  <span className="text-lg font-black">{stats.level}</span>
+                </div>
+              </div>
+            </motion.div>
+          )}
+
+          {state === AppState.LOADING_AYAH && (
+            <motion.div key="loading" variants={pageVariants} initial="initial" animate="enter" exit="exit" className="flex-1 flex flex-col items-center justify-center gap-6 py-20 min-h-full">
+              <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }} className="w-20 h-20 border-4 border-emerald-50 border-t-emerald-900 rounded-full" />
+              <p className="text-xl font-bold text-emerald-900 quran-text">جاري تحضير أسئلة المراجعة...</p>
+            </motion.div>
+          )}
+
+          {(state !== AppState.IDLE && state !== AppState.LOADING_AYAH && state !== AppState.SESSION_SUMMARY) && (
+            <motion.div key="active-session" variants={pageVariants} initial="initial" animate="enter" exit="exit" className="flex-none flex flex-col min-h-0 py-4">
+              <div className="flex items-center justify-between mb-6 px-2 shrink-0">
+                <div className="flex items-center gap-4">
+                  <div className="h-1.5 w-32 bg-slate-100 rounded-full overflow-hidden">
+                    <motion.div initial={{ width: 0 }} animate={{ width: `${((currentQuestionIndex + 1) / QUESTIONS_PER_SESSION) * 100}%` }} className="h-full bg-emerald-900" />
+                  </div>
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{currentQuestionIndex + 1} / {QUESTIONS_PER_SESSION}</span>
+                </div>
+                {error && <div className="text-red-500 text-[10px] font-bold bg-red-50 px-3 py-1 rounded-lg border border-red-100 animate-pulse">{error}</div>}
+              </div>
+
+              {state === AppState.FINISHED && result ? (
+                <div ref={resultCardRef} className="flex-none flex flex-col bg-white rounded-3xl shadow-sm border border-slate-100 overflow-hidden mb-24">
+                  <motion.div initial={{ y: -20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} className="bg-emerald-900 text-white p-6 flex flex-col md:flex-row items-center justify-between gap-4 shrink-0">
+                    <div className="flex items-center gap-4">
+                      <span className="text-5xl">{result.statusIcon}</span>
+                      <div>
+                        <h4 className="text-lg font-bold">دقة التسميع: {result.accuracy}%</h4>
+                        <p className="text-emerald-100 text-xs opacity-80">{result.feedback}</p>
+                      </div>
+                    </div>
+                    <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={nextAyah} className="px-8 py-3 bg-white text-emerald-900 rounded-xl font-bold text-sm btn-modern flex items-center gap-2">
+                      {currentQuestionIndex + 1 < QUESTIONS_PER_SESSION ? 'الآية التالية' : 'إنهاء الجلسة'} <ChevronLeft size={18} />
+                    </motion.button>
+                  </motion.div>
+                  <div className="p-6 md:p-10 space-y-10">
+                    <div className="text-center space-y-6">
+                      <div className="inline-flex items-center gap-3 text-slate-400 text-[10px] font-black uppercase tracking-widest">سياق الصفحة {currentAyah?.page}</div>
+                      <div className="quran-text text-2xl md:text-3xl text-right text-slate-800 leading-[2.5]">
+                        {currentAyah?.pageAyahs?.map((ayah, i) => (
+                          <span key={i} className={ayah.ayahNumber === currentAyah.number ? 'ayah-highlight inline' : ''}>
+                            {ayah.text} <span className="text-emerald-900/30 text-sm mx-1">﴿{ayah.ayahNumber}﴾</span>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-6">
+                      <div className="bg-amber-50 p-6 rounded-2xl border border-amber-100 shadow-sm">
+                        <div className="flex items-center gap-3 text-amber-900 mb-3"><MessageCircle size={18} /><h5 className="font-bold text-sm">ملاحظات الأداء</h5></div>
+                        <p className="text-slate-700 text-xs leading-relaxed italic">{result.tajweedNotes || "لا توجد ملاحظات تجويد واضحة."}</p>
+                      </div>
+                      <div className="bg-emerald-50 p-6 rounded-2xl border border-emerald-100 shadow-sm">
+                        <div className="flex items-center gap-3 text-emerald-900 mb-3"><Lightbulb size={18} /><h5 className="font-bold text-sm">نصيحة للتثبيت</h5></div>
+                        <p className="text-slate-700 text-xs leading-relaxed italic">{result.memorizationTip}</p>
+                      </div>
+                    </div>
+                    <div className="bg-slate-50 p-6 md:p-10 rounded-3xl border border-slate-100">
+                      <h5 className="text-[10px] font-black text-slate-400 uppercase mb-6 text-center">المقارنة الصوتية</h5>
+                      <div className="quran-text text-xl md:text-3xl text-right leading-loose">
+                        {result.userComparison?.map((word, i) => (
+                          <React.Fragment key={i}>
+                            <span className={`${word.isCorrect ? 'text-slate-800' : 'text-red-500 decoration-red-200 underline underline-offset-8'}`}>
+                              {word.text}
+                            </span>
+                            {i < (result.userComparison?.length || 0) - 1 && ' '}
+                          </React.Fragment>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex-none flex flex-col items-center justify-center space-y-8 min-h-full">
+                  <div ref={contextRef} className="w-full bg-white p-6 rounded-3xl border border-slate-100 shadow-sm relative overflow-hidden shrink-0">
+                    <div className="absolute top-0 left-0 bg-emerald-900 text-white px-4 py-1 rounded-br-2xl text-[10px] font-bold">السياق</div>
+                    <div className="absolute top-0 right-0 p-4 text-emerald-900/10"><Quote size={60} /></div>
+                    <p className="quran-text text-xl md:text-2xl text-slate-600 text-center italic relative z-10 leading-relaxed px-4">"{currentAyah?.previousAyahText}"</p>
+                    <div className="mt-4 flex justify-center gap-4">
+                      <span className="text-[10px] font-bold bg-slate-50 px-3 py-1 rounded-full text-slate-400">آية {currentAyah?.previousAyahNumber || (currentAyah?.number ? currentAyah.number - 1 : 0)}</span>
+                      <span className="text-[10px] font-bold bg-slate-50 px-3 py-1 rounded-full text-slate-400">صفحة {currentAyah?.page}</span>
+                    </div>
+                  </div>
+                  <div ref={challengeRef} className="w-full flex-none flex flex-col items-center justify-center space-y-6 py-10">
+                    <div className="text-center space-y-4">
+                      <p className="text-emerald-900 font-bold text-sm uppercase tracking-widest">أكمل من قوله تعالى:</p>
+                      <h3 className="quran-text text-4xl md:text-6xl text-slate-900 font-bold leading-tight flex flex-wrap justify-center items-center gap-2">
+                        <span>{currentAyah?.startWords}</span>
+                        <AnimatePresence>
+                          {hintsRevealed.map((word, idx) => (
+                            <motion.span key={idx} initial={{ opacity: 0, scale: 0.8, y: 10 }} animate={{ opacity: 1, scale: 1, y: 0 }} className="text-emerald-700 underline decoration-emerald-200 underline-offset-8">
+                              {word}
+                            </motion.span>
+                          ))}
+                        </AnimatePresence>
+                        <span className="text-emerald-200">...</span>
+                      </h3>
+                    </div>
+                    <div ref={recordingRef} className="w-full max-w-sm pt-4 flex flex-col items-center gap-8">
+                      {(state === AppState.READY || state === AppState.RECORDING) && (
+                        <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={handleGetHint} className="flex items-center gap-2 px-6 py-2.5 bg-amber-50 text-amber-700 border border-amber-100 rounded-full text-xs font-bold hover:bg-amber-100 transition-colors shadow-sm">
+                          <HelpCircle size={16} />أريد تلميحاً (-{HINT_PENALTY_PER_WORD}%)
+                        </motion.button>
+                      )}
+                      {state === AppState.READY && (
+                        <div className="flex flex-col items-center gap-4">
+                          <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }} onClick={startRecording} className="w-24 h-24 bg-emerald-900 text-white rounded-full flex items-center justify-center shadow-xl shadow-emerald-900/20 btn-modern"><Mic size={36} /></motion.button>
+                          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">اضغط للبدء بالتسميع</p>
+                        </div>
+                      )}
+                      {state === AppState.RECORDING && (
+                        <div className="flex flex-col items-center gap-6 w-full">
+                          <motion.button animate={{ scale: [1, 1.1, 1] }} transition={{ repeat: Infinity, duration: 1.5 }} onClick={stopRecording} className="w-24 h-24 bg-red-600 text-white rounded-full flex items-center justify-center shadow-xl shadow-red-600/20 btn-modern relative">
+                            <div className="absolute inset-0 bg-red-600 rounded-full animate-ping opacity-20"></div>
+                            <div className="w-6 h-6 bg-white rounded-sm"></div>
+                          </motion.button>
+                          <div className="bg-white px-8 py-4 rounded-2xl border-2 border-emerald-900 text-center shadow-lg w-full max-h-40 overflow-hidden">
+                             <p className="text-emerald-900 font-bold italic leading-relaxed break-words">
+                               {transcript ? `"${transcript}"` : (
+                                 <span className="flex items-center justify-center gap-2 opacity-50">
+                                   <span className="w-2 h-2 bg-emerald-900 rounded-full animate-bounce"></span>
+                                   <span className="w-2 h-2 bg-emerald-900 rounded-full animate-bounce delay-100"></span>
+                                   <span className="w-2 h-2 bg-emerald-900 rounded-full animate-bounce delay-200"></span>
+                                   جاري التسجيل...
+                                 </span>
+                               )}
+                             </p>
+                          </div>
+                        </div>
+                      )}
+                      {state === AppState.CONFIRMING && (
+                        <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="flex flex-col items-center gap-6 w-full">
+                          <div className="bg-white w-full p-8 rounded-3xl border-2 border-dashed border-emerald-100 text-center shadow-sm">
+                            <p className="text-2xl font-black text-slate-800 italic break-words">
+                               {transcript ? `"${transcript}"` : "تم تسجيل التلاوة بنجاح"}
+                            </p>
+                            {!transcript && <p className="text-xs text-slate-400 mt-2">سيتم تحليل الصوت مباشرة للحصول على أدق نتيجة</p>}
+                          </div>
+                          <div className="flex gap-4 w-full">
+                            <button onClick={handleEvaluate} className="flex-[3] py-5 bg-emerald-900 text-white rounded-2xl font-black text-xl shadow-lg btn-modern flex items-center justify-center gap-2">تأكيد <Check size={24}/></button>
+                            <button onClick={startRecording} className="flex-1 py-5 bg-slate-100 text-slate-500 rounded-2xl font-bold btn-modern">إعادة</button>
+                          </div>
+                        </motion.div>
+                      )}
+                      {state === AppState.EVALUATING && (
+                        <div className="flex flex-col items-center gap-4">
+                          <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: "linear" }} className="w-12 h-12 border-4 border-emerald-50 border-t-emerald-900 rounded-full" />
+                          <p className="text-sm font-bold text-emerald-900 animate-pulse">مُعين يستمع ويحلل تلاوتك...</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </motion.div>
+          )}
+
+          {state === AppState.SESSION_SUMMARY && (
+            <motion.div key="summary" ref={summaryRef} variants={pageVariants} initial="initial" animate="enter" exit="exit" className="flex-none flex flex-col items-center justify-center text-center space-y-10 py-20 min-h-full">
+              <div className="relative">
+                <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: "spring", damping: 10 }} className="w-40 h-40 bg-white rounded-full flex items-center justify-center shadow-2xl border-8 border-emerald-50"><Trophy className="text-emerald-900" size={80} /></motion.div>
+                <motion.div animate={{ scale: [1, 1.2, 1], rotate: [0, 10, -10, 0] }} transition={{ repeat: Infinity, duration: 2 }} className="absolute -top-4 -right-4"><Sparkles size={40} className="text-amber-500" /></motion.div>
+              </div>
+              <div className="space-y-4">
+                <h2 className="text-5xl font-black text-emerald-900 quran-text">صدق الله العظيم</h2>
+                <p className="text-slate-500 text-lg italic">بوركت جهودك في تثبيت كتاب الله الكريم</p>
+              </div>
+              <div className="grid grid-cols-2 gap-6 w-full max-w-sm">
+                <motion.div whileHover={{ y: -5 }} className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm"><p className="text-slate-400 text-[11px] font-black uppercase mb-2">متوسط الإتقان</p><p className="text-4xl font-black text-emerald-900">{sessionResults.length > 0 ? Math.round(sessionResults.reduce((a,b)=>a+b.accuracy,0)/sessionResults.length) : 0}%</p></motion.div>
+                <motion.div whileHover={{ y: -5 }} className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm"><p className="text-slate-400 text-[11px] font-black uppercase mb-2">أداء التجويد</p><p className="text-4xl font-black text-amber-600">{sessionResults.length > 0 ? Math.round(sessionResults.reduce((a,b)=>a+b.accuracy,0)/sessionResults.length) : 0}%</p></motion.div>
+              </div>
+              <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={() => setState(AppState.IDLE)} className="px-12 py-5 bg-emerald-900 text-white rounded-2xl font-black text-xl shadow-xl flex items-center gap-4 btn-modern">العودة للرئيسية <RotateCcw size={24} /></motion.button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </main>
+
+      {/* History Slide-over */}
+      <AnimatePresence>
+        {showHistory && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 md:p-12">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={() => setShowHistory(false)} />
+            <motion.div initial={{ y: "100%" }} animate={{ y: 0 }} exit={{ y: "100%" }} transition={{ type: "spring", damping: 25, stiffness: 200 }} className="bg-white w-full max-w-2xl h-[85vh] rounded-[2.5rem] shadow-2xl flex flex-col overflow-hidden relative">
+              <div className="p-8 shrink-0 border-b border-slate-50 bg-slate-50/50">
+                <div className="flex justify-between items-center mb-6"><h3 className="text-2xl font-black text-slate-900 quran-text">سجل المراجعة</h3><button onClick={() => setShowHistory(false)} className="p-2 rounded-xl hover:bg-white transition-all text-slate-400"><X size={24}/></button></div>
+                <div className="flex flex-wrap gap-3 items-center">
+                  <div className="flex items-center gap-2 bg-white px-4 py-2 rounded-xl border border-slate-100 shadow-sm text-xs font-bold text-slate-500"><Filter size={14} /><select className="bg-transparent outline-none cursor-pointer" value={historyFilter} onChange={(e) => setHistoryFilter(e.target.value as any)}><option value="all">كل المراجعات</option><option value="correct">المتقنة فقط</option><option value="mistakes">تحتاج مراجعة</option></select></div>
+                  <div className="flex items-center gap-2 bg-white px-4 py-2 rounded-xl border border-slate-100 shadow-sm text-xs font-bold text-slate-500"><ArrowUpDown size={14} /><select className="bg-transparent outline-none cursor-pointer" value={historySort} onChange={(e) => setHistorySort(e.target.value as any)}><option value="dateDesc">الأحدث أولاً</option><option value="dateAsc">الأقدم أولاً</option><option value="accDesc">الأعلى دقة</option><option value="accAsc">الأقل دقة</option></select></div>
+                </div>
+              </div>
+              <div className="flex-1 overflow-y-auto p-6 space-y-4 history-scroll bg-slate-50/30">
+                {filteredHistory.map(h => (
+                  <motion.div layout key={h.id} className="p-6 bg-white rounded-2xl border border-slate-100 hover:border-emerald-200 transition-all group shadow-sm">
+                    <div className="flex justify-between items-start mb-4"><div className="flex items-center gap-2 text-[10px] font-black text-slate-400 uppercase tracking-widest"><Calendar size={12} />{new Date(h.timestamp).toLocaleDateString('ar-EG', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</div><div className={`px-4 py-1.5 rounded-full text-[10px] font-black border flex items-center gap-1.5 ${h.accuracy > 85 ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-amber-50 text-amber-700 border-amber-100'}`}><Target size={12} />{h.accuracy}%</div></div>
+                    <p className="quran-text text-xl text-slate-800 leading-relaxed mb-4 line-clamp-2">"{h.textSnippet}..."</p>
+                    <div className="flex flex-wrap gap-2"><span className="text-[10px] font-bold text-slate-500 bg-slate-100 px-3 py-1 rounded-lg">آية {h.ayahNumber}</span><span className="text-[10px] font-bold text-slate-500 bg-slate-100 px-3 py-1 rounded-lg">صفحة {h.pageNumber}</span><span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-3 py-1 rounded-lg border border-emerald-100 uppercase">{h.difficulty === 'hard' ? 'متقن' : h.difficulty === 'medium' ? 'متوسط' : 'يسير'}</span></div>
+                  </motion.div>
+                ))}
+                {filteredHistory.length === 0 && <div className="flex flex-col items-center justify-center h-full opacity-20 py-20 text-center space-y-4"><BookOpen size={100} /><p className="font-bold text-xl">لا توجد سجلات مطابقة</p></div>}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+};
+
+export default App;
