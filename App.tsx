@@ -66,6 +66,7 @@ const App: React.FC = () => {
   const mainScrollRef = useRef<HTMLElement>(null);
   const challengeRef = useRef<HTMLDivElement>(null);
   const recordingRef = useRef<HTMLDivElement>(null);
+  const transcriptRef = useRef<HTMLDivElement>(null); // Ref for auto-scrolling transcript
   const resultCardRef = useRef<HTMLDivElement>(null);
   const summaryRef = useRef<HTMLDivElement>(null);
   const contextRef = useRef<HTMLDivElement>(null);
@@ -104,6 +105,13 @@ const App: React.FC = () => {
       executeProgrammaticScroll(challengeRef);
     }
   }, [hintsRevealed]);
+
+  // Auto-scroll transcript to bottom whenever text updates
+  useEffect(() => {
+    if (transcriptRef.current) {
+      transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight;
+    }
+  }, [transcript]);
 
   useEffect(() => {
     const saved = localStorage.getItem('muein_modern_v2');
@@ -514,7 +522,7 @@ const App: React.FC = () => {
                              </div>
                           </div>
                           
-                          <div className="bg-white px-8 py-4 rounded-2xl border-2 border-emerald-900 text-center shadow-lg w-full max-h-40 overflow-hidden">
+                          <div ref={transcriptRef} className="bg-white px-8 py-4 rounded-2xl border-2 border-emerald-900 text-center shadow-lg w-full max-h-40 overflow-y-auto scroll-smooth">
                              <p className="text-emerald-900 font-bold italic leading-relaxed break-words">
                                {transcript ? `"${transcript}"` : (
                                  <span className="flex items-center justify-center gap-2 opacity-50">
