@@ -388,16 +388,16 @@ const App: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-           {/* Energy/Quota Indicator */}
-           <div className="hidden md:flex flex-col items-end mr-2">
+        <div className="flex items-center gap-2 pl-1">
+           {/* Energy/Quota Indicator - Visible on Mobile now */}
+           <div className="flex flex-col items-end mr-2">
              <div className="flex items-center gap-1">
                <span className={`text-[10px] font-black uppercase ${getQuotaColor()}`}>
                  {quotaPercent}%
                </span>
                <Zap size={16} className={`${getQuotaColor()} fill-current`} />
              </div>
-             <div className="w-24 h-1 bg-slate-100 rounded-full mt-1 overflow-hidden">
+             <div className="w-16 md:w-24 h-1 bg-slate-100 rounded-full mt-1 overflow-hidden">
                <motion.div 
                  initial={{ width: '100%' }}
                  animate={{ width: `${quotaPercent}%` }}
@@ -421,14 +421,6 @@ const App: React.FC = () => {
           {state === AppState.IDLE && (
             <motion.div key="idle" variants={pageVariants} initial="initial" animate="enter" exit="exit" className="flex-none flex flex-col items-center justify-center text-center space-y-8 py-20 min-h-full">
               
-              {/* Mobile Quota Indicator */}
-              <div className="md:hidden absolute top-0 left-0 right-0 flex justify-center p-4">
-                 <div className="flex items-center gap-2 bg-white/80 px-4 py-2 rounded-full shadow-sm border border-slate-100">
-                    <Zap size={14} className={`${getQuotaColor()} fill-current`} />
-                    <span className="text-xs font-bold text-slate-600">طاقة السيرفر: {quotaPercent}%</span>
-                 </div>
-              </div>
-
               <div className="space-y-4">
                 <h2 className="text-5xl md:text-7xl font-bold text-slate-900 quran-text leading-tight">تثبيت سورة البقرة <br/><span className="text-emerald-800">بالذكاء الاصطناعي</span></h2>
                 <p className="text-slate-500 text-lg md:text-xl max-w-xl mx-auto leading-relaxed">اختبر جودة حفظك من خلال التسميع الصوتي والتقييم الفوري المعتمد على مخارج الحروف الصحيحة.</p>
