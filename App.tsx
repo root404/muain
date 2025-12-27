@@ -525,14 +525,19 @@ const App: React.FC = () => {
                     <div className="bg-slate-50 p-6 md:p-10 rounded-3xl border border-slate-100">
                       <h5 className="text-[10px] font-black text-slate-400 uppercase mb-6 text-center">المقارنة الصوتية</h5>
                       <div className="quran-text text-xl md:text-3xl text-right leading-loose">
-                        {result.userComparison?.map((word, i) => (
+                        {Array.isArray(result.userComparison) ? result.userComparison.map((word, i) => (
                           <React.Fragment key={i}>
                             <span className={`${word.isCorrect ? 'text-slate-800' : 'text-red-500 decoration-red-200 underline underline-offset-8'}`}>
                               {word.text}
                             </span>
                             {i < (result.userComparison?.length || 0) - 1 && ' '}
                           </React.Fragment>
-                        ))}
+                        )) : (
+                          <span className="text-slate-500 text-sm italic">
+                             {/* Fallback if userComparison is somehow not an array (e.g. string) */}
+                             {typeof result.userComparison === 'string' ? result.userComparison : "تعذر عرض المقارنة التفصيلية."}
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
