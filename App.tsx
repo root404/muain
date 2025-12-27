@@ -6,7 +6,7 @@ import {
   MessageCircle, Lightbulb, Check,
   Play, RotateCcw, HelpCircle,
   Filter, ArrowUpDown, Calendar, Target,
-  Clock, Zap, AlertTriangle // Added Zap and AlertTriangle
+  Clock, Zap, AlertTriangle, FileText, Waves // Added FileText, Waves
 } from 'lucide-react';
 import { motion, AnimatePresence, Variants } from 'framer-motion';
 import { getAyahBatch, evaluateRecitation, evaluateAudioRecitation, getRateLimitStatus } from './geminiService.ts';
@@ -50,6 +50,9 @@ const App: React.FC = () => {
   const [sessionResults, setSessionResults] = useState<EvaluationResult[]>([]);
   const [hintsRevealed, setHintsRevealed] = useState<string[]>([]);
   
+  // Recitation Mode: 'audio' (Best for Tajweed, No Live Text on Mobile) | 'text' (Live Text, Basic Evaluation)
+  const [recitationMode, setRecitationMode] = useState<'audio' | 'text'>('audio');
+
   // Rate Limit State
   const [quotaPercent, setQuotaPercent] = useState<number>(100);
   
@@ -63,7 +66,7 @@ const App: React.FC = () => {
   const [historySort, setHistorySort] = useState<'dateDesc' | 'dateAsc' | 'accDesc' | 'accAsc'>('dateDesc');
   const [historyFilter, setHistoryFilter] = useState<'all' | 'correct' | 'mistakes'>('all');
 
-  // We keep this for Visual Feedback (Real-time text), but use Audio for Logic
+  // Speech Recognition Ref
   const recognitionRef = useRef<any>(null);
   
   const mainScrollRef = useRef<HTMLElement>(null);
@@ -120,7 +123,7 @@ const App: React.FC = () => {
     const saved = localStorage.getItem('muein_modern_v2');
     if (saved) try { setHistory(JSON.parse(saved)); } catch(e) {}
 
-    // Initialize Speech Recognition for Visual Feedback Only
+    // Initialize Speech Recognition
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (SpeechRecognition) {
       recognitionRef.current = new SpeechRecognition();
@@ -129,8 +132,6 @@ const App: React.FC = () => {
       recognitionRef.current.interimResults = true;
       
       recognitionRef.current.onresult = (event: any) => {
-        // IMPORTANT: We must iterate from 0 to length every time to reconstruct the full transcript.
-        // If we rely on resultIndex, we lose previous segments when the engine detects a pause/finality.
         let finalTranscript = '';
         let interimTranscript = '';
 
@@ -144,10 +145,11 @@ const App: React.FC = () => {
         setTranscript(finalTranscript + ' ' + interimTranscript);
       };
 
-      // Prevent recognition from stopping automatically if the user pauses for a long time
-      // Note: We don't force restart here to avoid infinite loops, but the AudioRecorder is separate and won't stop.
       recognitionRef.current.onerror = (event: any) => {
         console.warn("Speech recognition error", event.error);
+        if (event.error === 'not-allowed') {
+           setError("يرجى السماح بصلاحية الميكروفون");
+        }
       };
     }
 
@@ -233,33 +235,41 @@ const App: React.FC = () => {
     setRecordingDuration(0);
     audioChunksRef.current = [];
     
+    // Start Timer
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = setInterval(() => {
+      setRecordingDuration(prev => prev + 1);
+    }, 1000);
+
+    setState(AppState.RECORDING);
+
     try {
-      // Start Visual Recognition
-      try { recognitionRef.current?.start(); } catch (e) { /* ignore if already started */ }
-      
-      // Start Actual Audio Recording
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = mediaRecorder;
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
+      if (recitationMode === 'text') {
+        // Text Mode: Use Speech Recognition ONLY
+        try { 
+          recognitionRef.current?.start(); 
+        } catch (e) { 
+           console.warn("Recognition start failed", e);
+           // If double start, ignore
         }
-      };
+      } else {
+        // Audio Mode: Use MediaRecorder ONLY (Prioritize Mic for Recording)
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const mediaRecorder = new MediaRecorder(stream);
+        mediaRecorderRef.current = mediaRecorder;
 
-      mediaRecorder.start();
-      setState(AppState.RECORDING);
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            audioChunksRef.current.push(event.data);
+          }
+        };
 
-      // Start Timer
-      if (timerRef.current) clearInterval(timerRef.current);
-      timerRef.current = setInterval(() => {
-        setRecordingDuration(prev => prev + 1);
-      }, 1000);
-
+        mediaRecorder.start();
+      }
     } catch (e) {
       setError("يرجى السماح بصلاحية الميكروفون");
       setState(AppState.READY);
+      if (timerRef.current) clearInterval(timerRef.current);
     }
   };
 
@@ -270,29 +280,28 @@ const App: React.FC = () => {
       timerRef.current = null;
     }
 
-    // Stop Visual Recognition
-    try { recognitionRef.current?.stop(); } catch(e) {}
-
-    // Stop Actual Recording
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.onstop = () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' }); // Chrome/Android uses webm usually
-        setAudioBlob(audioBlob);
-        
-        // If we didn't catch text visually, but have audio, we can still proceed
-        if (audioChunksRef.current.length > 0) {
-             setState(AppState.CONFIRMING);
-        } else {
-             setError("لم يتم تسجيل صوت");
-             setState(AppState.READY);
-        }
-        
-        // Stop all tracks
-        mediaRecorderRef.current?.stream.getTracks().forEach(track => track.stop());
-      };
-      mediaRecorderRef.current.stop();
+    if (recitationMode === 'text') {
+      // Stop Speech Recognition
+      try { recognitionRef.current?.stop(); } catch(e) {}
+      setState(AppState.CONFIRMING);
     } else {
-       setState(AppState.READY);
+      // Stop Media Recorder
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.onstop = () => {
+          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          setAudioBlob(audioBlob);
+          if (audioChunksRef.current.length > 0) {
+              setState(AppState.CONFIRMING);
+          } else {
+              setError("لم يتم تسجيل صوت");
+              setState(AppState.READY);
+          }
+          mediaRecorderRef.current?.stream.getTracks().forEach(track => track.stop());
+        };
+        mediaRecorderRef.current.stop();
+      } else {
+        setState(AppState.READY);
+      }
     }
   };
 
@@ -307,14 +316,17 @@ const App: React.FC = () => {
       if (currentAyah) {
         let evalResult: EvaluationResult;
         
-        // Prefer Audio Analysis if available
-        if (audioBlob) {
+        // Use Audio Evaluation if in Audio Mode and we have a blob
+        if (recitationMode === 'audio' && audioBlob) {
            const base64Audio = await blobToBase64(audioBlob);
-           // Detect MIME type (fallback to audio/webm if not explicit, though Blob usually has it)
            const mimeType = audioBlob.type || 'audio/webm';
            evalResult = await evaluateAudioRecitation(currentAyah.text, base64Audio, mimeType);
         } else {
-           // Fallback to text analysis if audio failed for some reason
+           // Fallback or Text Mode: Use Text Analysis
+           // Note: In Text Mode, we rely on 'transcript' captured by SpeechRecognition
+           if (!transcript && recitationMode === 'text') {
+              throw new Error("لم يتم التقاط نص. يرجى المحاولة مرة أخرى أو التبديل للوضع الصوتي.");
+           }
            evalResult = await evaluateRecitation(currentAyah.text, transcript);
         }
 
@@ -340,7 +352,7 @@ const App: React.FC = () => {
     } catch (e: any) {
       console.error(e);
       setError(e.message || "خطأ في تحليل التسميع");
-      setState(AppState.CONFIRMING); // Go back to confirming state so user can retry later
+      setState(AppState.CONFIRMING); 
     }
   };
 
@@ -534,7 +546,6 @@ const App: React.FC = () => {
                           </React.Fragment>
                         )) : (
                           <span className="text-slate-500 text-sm italic">
-                             {/* Fallback if userComparison is somehow not an array (e.g. string) */}
                              {typeof result.userComparison === 'string' ? result.userComparison : "تعذر عرض المقارنة التفصيلية."}
                           </span>
                         )}
@@ -568,6 +579,27 @@ const App: React.FC = () => {
                         <span className="text-emerald-200">...</span>
                       </h3>
                     </div>
+                    
+                    {/* Mode Toggle */}
+                    {(state === AppState.READY || state === AppState.RECORDING || state === AppState.CONFIRMING) && (
+                      <div className="bg-white p-1 rounded-full shadow-sm border border-slate-100 flex items-center">
+                        <button 
+                          onClick={() => setRecitationMode('audio')}
+                          className={`flex items-center gap-2 px-4 py-2 rounded-full text-[10px] font-bold transition-all ${recitationMode === 'audio' ? 'bg-emerald-900 text-white shadow-md' : 'text-slate-400 hover:bg-slate-50'}`}
+                          disabled={state === AppState.RECORDING}
+                        >
+                          <Waves size={14} /> تحليل صوتي (دقيق)
+                        </button>
+                        <button 
+                          onClick={() => setRecitationMode('text')}
+                          className={`flex items-center gap-2 px-4 py-2 rounded-full text-[10px] font-bold transition-all ${recitationMode === 'text' ? 'bg-emerald-900 text-white shadow-md' : 'text-slate-400 hover:bg-slate-50'}`}
+                          disabled={state === AppState.RECORDING}
+                        >
+                          <FileText size={14} /> كتابة مباشرة (نص)
+                        </button>
+                      </div>
+                    )}
+
                     <div ref={recordingRef} className="w-full max-w-sm pt-4 flex flex-col items-center gap-8">
                       {(state === AppState.READY || state === AppState.RECORDING) && (
                         <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={handleGetHint} className="flex items-center gap-2 px-6 py-2.5 bg-amber-50 text-amber-700 border border-amber-100 rounded-full text-xs font-bold hover:bg-amber-100 transition-colors shadow-sm">
@@ -594,14 +626,31 @@ const App: React.FC = () => {
                           </div>
                           
                           <div ref={transcriptRef} className="bg-white px-8 py-4 rounded-2xl border-2 border-emerald-900 text-center shadow-lg w-full max-h-40 overflow-y-auto scroll-smooth">
+                             {/* Only show visualizer in Audio Mode */}
+                             {recitationMode === 'audio' && (
+                               <div className="flex items-center justify-center gap-1 h-8 mb-2 opacity-50">
+                                  {[...Array(5)].map((_, i) => (
+                                    <motion.div
+                                      key={i}
+                                      animate={{ height: [8, 20, 8] }}
+                                      transition={{ repeat: Infinity, duration: 0.8, delay: i * 0.1, ease: "easeInOut" }}
+                                      className="w-1.5 bg-emerald-900 rounded-full"
+                                    />
+                                  ))}
+                               </div>
+                             )}
+                             
                              <p className="text-emerald-900 font-bold italic leading-relaxed break-words">
-                               {transcript ? `"${transcript}"` : (
-                                 <span className="flex items-center justify-center gap-2 opacity-50">
-                                   <span className="w-2 h-2 bg-emerald-900 rounded-full animate-bounce"></span>
-                                   <span className="w-2 h-2 bg-emerald-900 rounded-full animate-bounce delay-100"></span>
-                                   <span className="w-2 h-2 bg-emerald-900 rounded-full animate-bounce delay-200"></span>
-                                   جاري التسجيل...
-                                 </span>
+                               {recitationMode === 'text' ? (
+                                   transcript ? `"${transcript}"` : (
+                                     <span className="flex items-center justify-center gap-2 opacity-70 text-sm">
+                                       جاري الاستماع...
+                                     </span>
+                                   )
+                               ) : (
+                                   <span className="flex items-center justify-center gap-2 opacity-70 text-sm">
+                                     يتم تسجيل الصوت للتحليل الدقيق...
+                                   </span>
                                )}
                              </p>
                           </div>
@@ -611,9 +660,16 @@ const App: React.FC = () => {
                         <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="flex flex-col items-center gap-6 w-full">
                           <div className="bg-white w-full p-8 rounded-3xl border-2 border-dashed border-emerald-100 text-center shadow-sm">
                             <p className="text-2xl font-black text-slate-800 italic break-words">
-                               {transcript ? `"${transcript}"` : "تم تسجيل التلاوة بنجاح"}
+                               {recitationMode === 'text' && transcript ? `"${transcript}"` : (
+                                 <span className="text-slate-500 flex flex-col items-center gap-2">
+                                   <Check size={30} className="text-emerald-500" />
+                                   تم تسجيل التلاوة بنجاح
+                                 </span>
+                               )}
                             </p>
-                            {!transcript && <p className="text-xs text-slate-400 mt-2">سيتم تحليل الصوت مباشرة للحصول على أدق نتيجة</p>}
+                            <p className="text-xs text-slate-400 mt-2">
+                              {recitationMode === 'audio' ? 'سيتم تحليل الملف الصوتي (الأدق)' : 'سيتم تحليل النص الملتقط'}
+                            </p>
                           </div>
                           <div className="flex gap-4 w-full">
                             <button onClick={handleEvaluate} className="flex-[3] py-5 bg-emerald-900 text-white rounded-2xl font-black text-xl shadow-lg btn-modern flex items-center justify-center gap-2">تأكيد <Check size={24}/></button>
