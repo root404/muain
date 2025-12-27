@@ -59,25 +59,68 @@ const SYSTEM_INSTRUCTION = `
 3. لا تقم أبداً بكتابة شرح نصي طويل داخل حقول الـ JSON المخصصة للمصفوفات.
 `;
 
-const cleanJsonResponse = (text: string | undefined): string => {
+const extractCleanJSON = (text: string | undefined): string => {
   if (!text) return "{}";
   
-  // 1. Try to extract from markdown code block first (most reliable)
-  const jsonBlockMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?\}|\[[\s\S]*?\])\s*```/);
-  if (jsonBlockMatch && jsonBlockMatch[1]) {
-    return jsonBlockMatch[1];
-  }
-
-  // 2. Fallback: Find the first '{' and the last '}'
-  const firstOpen = text.indexOf('{');
-  const lastClose = text.lastIndexOf('}');
+  // Find the first valid JSON start (either { or [)
+  const firstOpenBrace = text.indexOf('{');
+  const firstOpenBracket = text.indexOf('[');
   
-  if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
-    return text.substring(firstOpen, lastClose + 1);
+  let startIndex = -1;
+  let openChar = '';
+  let closeChar = '';
+
+  if (firstOpenBrace !== -1 && (firstOpenBracket === -1 || firstOpenBrace < firstOpenBracket)) {
+    startIndex = firstOpenBrace;
+    openChar = '{';
+    closeChar = '}';
+  } else if (firstOpenBracket !== -1) {
+    startIndex = firstOpenBracket;
+    openChar = '[';
+    closeChar = ']';
+  } else {
+    // No JSON start found, try to strip markdown codes anyway as a fallback
+    return text.replace(/```json/g, "").replace(/```/g, "").trim();
   }
 
-  // 3. Last resort clean up
-  return text.replace(/```json/g, "").replace(/```/g, "").trim();
+  let balance = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = startIndex; i < text.length; i++) {
+    const char = text[i];
+    
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    
+    if (!inString) {
+      if (char === openChar) {
+        balance++;
+      } else if (char === closeChar) {
+        balance--;
+        if (balance === 0) {
+          // Found the matching closing brace/bracket
+          return text.substring(startIndex, i + 1);
+        }
+      }
+    }
+  }
+
+  // If we reach here, brackets might be unbalanced or text is truncated
+  // Fallback to substring from start
+  return text.substring(startIndex);
 };
 
 const EVALUATION_SCHEMA: Schema = {
@@ -163,7 +206,7 @@ export const getAyahBatch = async (count: number, difficulty: Difficulty, exclud
       }
     });
 
-    const cleaned = cleanJsonResponse(response.text);
+    const cleaned = extractCleanJSON(response.text);
     return JSON.parse(cleaned);
   } catch (e) {
     return handleApiError(e);
@@ -189,7 +232,7 @@ export const evaluateRecitation = async (original: string, userRecitation: strin
       }
     });
 
-    const cleaned = cleanJsonResponse(response.text);
+    const cleaned = extractCleanJSON(response.text);
     const data = JSON.parse(cleaned);
     return {
       ...data,
@@ -232,7 +275,7 @@ export const evaluateAudioRecitation = async (original: string, audioBase64: str
       }
     });
 
-    const cleaned = cleanJsonResponse(response.text);
+    const cleaned = extractCleanJSON(response.text);
     const data = JSON.parse(cleaned);
     
     // Safety check to ensure userComparison is an array
