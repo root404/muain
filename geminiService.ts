@@ -50,27 +50,33 @@ const checkRateLimit = () => {
 };
 
 const SYSTEM_INSTRUCTION = `
-أنت "مُعين"، مساعد ذكي متخصص في مراجعة سورة البقرة.
-مهمتك هي اختيار آيات للاختبار وتقييم تسميع الطلاب بدقة وموضوعية.
-
-عند اختيار الآيات:
-- اختر آيات تتناسب مع مستوى الصعوبة.
-- وفر الآية السابقة دائماً لمساعدة الطالب.
-- هام جداً: وفر مصفوفة 'pageAyahs' تحتوي على آيات الصفحة الحالية (بحد أقصى 5 آيات محيطة) لنعرضها كصفحة قرآنية.
-- تأكد من إرجاع JSON صالح تماماً.
+أنت "مُعين"، نظام backend ذكي لتقييم تلاوة القرآن.
+مهمتك: إرجاع كائن JSON فقط وفقط، بدون أي نص إضافي، أو مقدمات، أو markdown خارج الـ JSON.
 
 عند التقييم:
-1. دقة الحفظ: قارن التلاوة المسموعة (أو النص) بالأصل حرفياً.
-2. التجويد: استنتج أخطاء النطق والتشكيل.
-3. المقارنة: وفر مصفوفة 'userComparison' توضح أخطاء المستخدم.
+1. قارن النص المنطوق بالنص الأصلي حرفياً.
+2. حقل 'userComparison' يجب أن يكون مصفوفة (Array) تحتوي على كلمات الآية بالترتيب مع حالة كل كلمة.
+3. لا تقم أبداً بكتابة شرح نصي طويل داخل حقول الـ JSON المخصصة للمصفوفات.
 `;
 
 const cleanJsonResponse = (text: string | undefined): string => {
   if (!text) return "{}";
-  const jsonMatch = text.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-  if (jsonMatch) {
-    return jsonMatch[0];
+  
+  // 1. Try to extract from markdown code block first (most reliable)
+  const jsonBlockMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?\}|\[[\s\S]*?\])\s*```/);
+  if (jsonBlockMatch && jsonBlockMatch[1]) {
+    return jsonBlockMatch[1];
   }
+
+  // 2. Fallback: Find the first '{' and the last '}'
+  const firstOpen = text.indexOf('{');
+  const lastClose = text.lastIndexOf('}');
+  
+  if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
+    return text.substring(firstOpen, lastClose + 1);
+  }
+
+  // 3. Last resort clean up
   return text.replace(/```json/g, "").replace(/```/g, "").trim();
 };
 
@@ -175,7 +181,7 @@ export const evaluateRecitation = async (original: string, userRecitation: strin
       model: "gemini-3-flash-preview",
       contents: `الآية الأصلية: "${original}"
 تسميع الطالب (نص): "${userRecitation}"
-قيم التسميع بدقة.`,
+قيم التسميع بدقة وأرجع JSON فقط.`,
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
         responseMimeType: "application/json",
@@ -207,14 +213,10 @@ export const evaluateAudioRecitation = async (original: string, audioBase64: str
       model: "gemini-3-flash-preview", 
       contents: [
         {
-          text: `استمع إلى هذا التسجيل الصوتي لتلاوة الطالب.
-الآية المطلوبة (النص الأصلي): "${original}"
-
-المطلوب:
-1. قم بتحويل الصوت إلى نص (Transcription) للتحقق مما قاله الطالب.
-2. قارن التلاوة بالنص الأصلي بدقة متناهية (انتبه للحركات ومخارج الحروف).
-3. قيم الحفظ والتجويد.
-أرجع النتيجة بصيغة JSON.`
+          text: `الآية الأصلية المطلوبة: "${original}"
+قم بتحليل الملف الصوتي المرفق.
+المطلوب: إرجاع كائن JSON يحتوي على نتيجة التقييم، Transcription للنص المقروء، ومصفوفة المقارنة (userComparison).
+تنبيه: لا تضف أي نص خارج الـ JSON. لا تكتب مقدمة أو خاتمة.`
         },
         {
           inlineData: {
@@ -232,6 +234,13 @@ export const evaluateAudioRecitation = async (original: string, audioBase64: str
 
     const cleaned = cleanJsonResponse(response.text);
     const data = JSON.parse(cleaned);
+    
+    // Safety check to ensure userComparison is an array
+    if (!Array.isArray(data.userComparison)) {
+      // Emergency fallback if AI fails to return an array
+      data.userComparison = original.split(' ').map(w => ({ text: w, isCorrect: true }));
+    }
+
     return {
       ...data,
       originalText: original,
