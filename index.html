@@ -1,0 +1,103 @@
+
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <title>مُعين | مساعد الحفظ الذكي</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400&family=Noto+Kufi+Arabic:wght@100..900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css"/>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      :root {
+        --quran-paper: #fdfbf7;
+        --quran-ink: #1e293b;
+        --quran-emerald: #064e3b;
+        --quran-gold: #d4af37;
+      }
+      
+      * {
+        box-sizing: border-box;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100vh;
+        height: 100dvh;
+        overflow: hidden; 
+        background-color: var(--quran-paper);
+        color: var(--quran-ink);
+        font-family: 'Noto Kufi Arabic', sans-serif;
+      }
+
+      #root {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .quran-text { 
+        font-family: 'Amiri', serif;
+        line-height: 2.2;
+      }
+      
+      /* حاوية تسمح بالتمرير اليدوي والبرمجي مع إخفاء الشريط */
+      .scroll-container {
+        height: 100%;
+        overflow-y: auto; /* يسمح بالتمرير الحر */
+        scrollbar-width: none; /* Firefox */
+        -ms-overflow-style: none; /* IE/Edge */
+        -webkit-overflow-scrolling: touch; /* تمرير سلس على iOS */
+      }
+      
+      .scroll-container::-webkit-scrollbar {
+        display: none; /* Chrome/Safari */
+      }
+
+      .ayah-highlight {
+        background-color: rgba(212, 175, 55, 0.25);
+        box-shadow: 0 0 0 1px rgba(212, 175, 55, 0.3);
+        border-radius: 6px;
+      }
+
+      .btn-modern {
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+      .btn-modern:active { transform: scale(0.95); }
+
+      .islamic-grid {
+        background-image: radial-gradient(#064e3b 0.5px, transparent 0.5px);
+        background-size: 30px 30px;
+        opacity: 0.03;
+      }
+
+      .history-scroll::-webkit-scrollbar { width: 4px; }
+      .history-scroll::-webkit-scrollbar-track { background: transparent; }
+      .history-scroll::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
+    </style>
+    <script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@^19.2.3",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "@google/genai": "https://esm.sh/@google/genai@^1.34.0",
+    "lucide-react": "https://esm.sh/lucide-react@^0.562.0",
+    "framer-motion": "https://esm.sh/framer-motion@^11.15.0",
+    "vite": "https://esm.sh/vite@^7.3.0",
+    "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2"
+  }
+}
+</script>
+  <link rel="stylesheet" href="/index.css">
+</head>
+  <body>
+    <div class="fixed inset-0 islamic-grid pointer-events-none"></div>
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
